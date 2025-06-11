@@ -1,174 +1,206 @@
-require('dotenv').config();
+// backend/index.js (Node/Express)
 const express = require('express');
 const cors = require('cors');
-const now = new Date();
-const yahooFinance = require('yahoo-finance2').default;
-const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
+const pdfParse = require('pdf-parse');
+const mammoth = require('mammoth');
+const PDFDocument = require('pdfkit');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-
 app.use(cors());
+app.use(express.json());
 
-const intervals = {
-  change1D: 1,
-  change3D: 3,
-  change1W: 7,
-  change1M: 30,
-  change1Y: 365,
-  change5Y: 1825,
-  changeYTD: Math.floor((now - new Date(now.getFullYear(), 0, 1)) / (1000 * 60 * 60 * 24)),
+// Ensure profiles directory exists
+const profilesDir = path.join(__dirname, 'profiles');
+if (!fs.existsSync(profilesDir)) {
+  fs.mkdirSync(profilesDir);
+}
 
-};
+// Helper function to create a safe file name (ID) from profile name
+function profileIdFromName(name) {
+  // Replace any non-alphanumeric characters with underscores
+  return name.replace(/[^a-zA-Z0-9]/g, '_');
+}
 
-const calculateChanges = (latest, history, now) => {
-    const changes = {};
-  
-    for (const [label, value] of Object.entries(intervals)) {
-      const targetDate = new Date(now);
-      targetDate.setDate(now.getDate() - value);
-      const dateStr = targetDate.toISOString().split("T")[0];
-  
-      const past = history.findLast(h => h.date.toISOString().split("T")[0] <= dateStr);
-      const pastValue = past?.close ?? past?.value;
-  
-      if (pastValue) {
-        const delta = latest - pastValue;
-        const percent = (delta / pastValue) * 100;
-        changes[label] = parseFloat(delta.toFixed(2));
-        changes[`${label}Percent`] = parseFloat(percent.toFixed(2));
-      } else {
-        changes[label] = null;
-        changes[`${label}Percent`] = null;
-      }
-    }
-  
-    return changes;
-  };
-  
-
-app.get('/api/commodities', async (req, res) => {
-  try {
-    const symbols = [
-      { symbol: 'GC=F', name: 'Gold', type: 'Metals' },
-      { symbol: 'SI=F', name: 'Silver', type: 'Metals' },
-      { symbol: 'HG=F', name: 'Copper', type: 'Metals' },
-      { symbol: 'PL=F', name: 'Platinum', type: 'Metals' },
-      { symbol: 'CL=F', name: 'Crude Oil', type: 'Energy' },
-      { symbol: 'NG=F', name: 'Natural Gas', type: 'Energy' }
-    ];
-
-    const now = new Date();
-
-    const results = await Promise.all(symbols.map(async ({ symbol, name, type }) => {
-      const quote = await yahooFinance.quote(symbol);
-      const history = await yahooFinance.historical(symbol, {
-        period1: new Date(now.getFullYear() - 6, now.getMonth(), now.getDate()),
-        period2: now,
-        interval: "1d"
-      });
-
-      const changes = calculateChanges(quote.regularMarketPrice, history, now);
-
-      return {
-        name,
-        value: quote.regularMarketPrice,
-        type,
-        spotPrice: true,
-        ...changes
-      };
-    }));
-
-    res.json(results);
-  } catch (error) {
-    console.error("❌ Error in /api/commodities:", error.message);
-    res.status(500).json({ error: "Failed to fetch commodities" });
+// Endpoint: Create a new profile
+app.post('/api/profiles', (req, res) => {
+  const profileName = req.body.name;
+  if (!profileName) {
+    return res.status(400).json({ error: "Name is required" });
   }
+  const id = profileIdFromName(profileName);
+  const filePath = path.join(profilesDir, `${id}.json`);
+  if (fs.existsSync(filePath)) {
+    return res.status(400).json({ error: "Profile already exists" });
+  }
+  // Initialize profile JSON data
+  const profileData = { id: id, name: profileName, files: [] };
+  fs.writeFileSync(filePath, JSON.stringify(profileData, null, 2));
+  return res.json(profileData);
 });
 
-app.get('/api/usd-eur', async (req, res) => {
-    try {
-      const symbol = 'EURUSD=X';
-      const name = 'EUR/USD';        
-      const type = 'FX';
-      const now = new Date();
-  
-      const quote = await yahooFinance.quote(symbol);
-      const history = await yahooFinance.historical(symbol, {
-        period1: new Date(now.getFullYear() - 6, now.getMonth(), now.getDate()),
-        period2: now,
-        interval: "1d"
-      });
-  
-      const changes = calculateChanges(quote.regularMarketPrice, history, now);
-  
-      res.json({
-        name,
-        value: quote.regularMarketPrice,
-        type,
-        spotPrice: false,
-        ...changes
-      });
-    } catch (error) {
-      console.error("❌ Failed to fetch USD/EUR:", error.message);
-      res.status(500).json({ error: 'Failed to fetch USD/EUR data' });
+app.put('/api/profiles/:id/files/:index', (req, res) => {
+  const { id, index } = req.params;
+  const filePath = path.join(profilesDir, `${id}.json`);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: "Profile not found" });
+
+  const profile = JSON.parse(fs.readFileSync(filePath));
+  if (!profile.files[index]) return res.status(404).json({ error: "File not found" });
+
+  // Allow editing date, tags, title
+  const { date, tags, title } = req.body;
+  if (date) profile.files[index].date = date;
+  if (tags) profile.files[index].tags = tags;
+  if (title) profile.files[index].title = title;
+
+  fs.writeFileSync(filePath, JSON.stringify(profile, null, 2));
+  res.json(profile.files[index]);
+});
+
+// Endpoint: Get list of all profiles
+app.get('/api/profiles', (req, res) => {
+  let profileList = [];
+  try {
+    const files = fs.readdirSync(profilesDir).filter(fn => fn.endsWith('.json'));
+    for (const file of files) {
+      const data = JSON.parse(fs.readFileSync(path.join(profilesDir, file)));
+      profileList.push({ id: data.id, name: data.name });
     }
-  });
+  } catch (err) {
+    console.error("Failed to list profiles:", err);
+  }
+  res.json(profileList);
+});
 
-  const series = [
-    { id: "GS10", name: "US 10-YR", type: "Bond" },
-    { id: "GS2", name: "US 2-YR", type: "Bond" },
-    { id: "GS30", name: "US 30-YR", type: "Bond" },
-    { id: "FEDFUNDS", name: "Fed Funds Rate", type: "Rates" },
-    { id: "T5YIFR", name: "5Y Inflation Expectation", type: "Inflation" }
-  ];
-  
-  
+// Endpoint: Get data for a single profile (its files metadata)
+app.get('/api/profiles/:id', (req, res) => {
+  const profileId = req.params.id;
+  const filePath = path.join(profilesDir, `${profileId}.json`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "Profile not found" });
+  }
+  const profileData = JSON.parse(fs.readFileSync(filePath));
+  res.json(profileData);
+});
 
-  app.get('/api/bonds', async (req, res) => {
+// Setup multer for file uploads (memory storage to handle files in RAM)
+const upload = multer({ storage: multer.memoryStorage() });
+
+// Endpoint: Upload files to a profile
+app.post('/api/profiles/:id/files', upload.array('files'), async (req, res) => {
+  const profileId = req.params.id;
+  const filePath = path.join(profilesDir, `${profileId}.json`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "Profile not found" });
+  }
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ error: "No files uploaded" });
+  }
+  // Load current profile data
+  let profileData = JSON.parse(fs.readFileSync(filePath));
+  for (const file of req.files) {
     try {
-      const apiKey = process.env.FRED_API_KEY;
+      const originalName = file.originalname;
+      // Determine file type from extension
+      const ext = path.extname(originalName).toLowerCase();
+      let fileType;
+      if (ext === '.pdf') fileType = 'PDF';
+      else if (ext === '.docx' || ext === '.doc') fileType = 'DOCX';
+      else if (ext === '.txt') fileType = 'TXT';
+      else {
+        fileType = 'OTHER';
+      }
+      // Extract text content based on file type
+      let textContent = "";
+      if (fileType === 'PDF') {
+        const data = await pdfParse(file.buffer);
+        textContent = data.text;
+      } else if (fileType === 'DOCX') {
+        const result = await mammoth.extractRawText({ buffer: file.buffer });
+        textContent = result.value;
+      } else if (fileType === 'TXT') {
+        textContent = file.buffer.toString('utf-8');
+      } else {
+        // Skip unsupported file types
+        textContent = "";
+      }
+      // Use file name (without extension) as title
+      const title = originalName.replace(/\.[^/.]+$/, "");
       const now = new Date();
-  
-      const series = [
-        { id: "GS10", name: "US 10-YR" },
-        { id: "GS2", name: "US 2-YR" },
-        { id: "GS30", name: "US 30-YR" },
-      ];
-  
-      const bondPromises = series.map(async ({ id, name, type }) => {
-        const url = `https://api.stlouisfed.org/fred/series/observations?series_id=${id}&api_key=${apiKey}&file_type=json&observation_start=2018-01-01`;
-        const response = await axios.get(url);
-      
-        const history = response.data.observations
-          .filter(o => o.value !== ".")
-          .map(o => ({
-            date: new Date(o.date),
-            value: parseFloat(o.value)
-          }));
-      
-        const latest = history.at(-1).value;
-        const changes = calculateChanges(latest, history, now);
-      
-        return {
-          name,
-          value: latest,
-          type, // Bond, Rates eller Inflation
-          spotPrice: false,
-          ...changes
-        };
-      });      
-  
-      const results = await Promise.all(bondPromises);
-      res.json(results);
-  
-    } catch (error) {
-      console.error("❌ Error in /api/bonds:", error.message);
-      res.status(500).json({ error: "Failed to fetch bond data" });
+      const metadata = {
+        title: title,
+        date: now.toISOString(),
+        type: fileType,
+        tags: req.body.tags || [], // ← expects array of strings
+        content: textContent
+      };
+      profileData.files.push(metadata);
+    } catch (err) {
+      console.error("Error processing file:", file.originalname, err);
     }
-  });
-  
+  }
+  // (Optionally, sort files by date here if desired)
+  // profileData.files.sort((a, b) => new Date(a.date) - new Date(b.date));
+  // Save updated profile JSON
+  fs.writeFileSync(filePath, JSON.stringify(profileData, null, 2));
+  res.json(profileData);  // return updated profile data (including new files)
+});
 
+app.delete('/api/profiles/:id/files/:index', (req, res) => {
+  const { id, index } = req.params;
+  const filePath = path.join(profilesDir, `${id}.json`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "Profile not found" });
+  }
+
+  const profileData = JSON.parse(fs.readFileSync(filePath));
+  if (!profileData.files[index]) {
+    return res.status(404).json({ error: "File not found" });
+  }
+
+  profileData.files.splice(index, 1); // remove 1 file at index
+  fs.writeFileSync(filePath, JSON.stringify(profileData, null, 2));
+  res.json({ success: true });
+});
+
+
+// Endpoint: Compile all files of a profile into one PDF
+app.get('/api/profiles/:id/compile', (req, res) => {
+  const profileId = req.params.id;
+  const filePath = path.join(profilesDir, `${profileId}.json`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "Profile not found" });
+  }
+  const profileData = JSON.parse(fs.readFileSync(filePath));
+  const files = profileData.files;
+  // Sort files by date ascending
+  files.sort((a, b) => new Date(a.date) - new Date(b.date));
+  // Create a PDF document and stream it to response
+  const doc = new PDFDocument();
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${profileId}_compiled.pdf"`);
+  doc.pipe(res);
+  // Add AI command at beginning
+  doc.fontSize(12).text("<< AI COMMAND START >>\n", { bold: true });
+  // Add each file's content with its metadata
+  files.forEach(file => {
+    doc.moveDown();  // blank line
+    // Title and date
+    doc.fontSize(12).text(`${file.title} (${file.date.split('T')[0]} - ${file.type})`, { underline: true });
+    doc.moveDown(0.5);
+    // File content
+    doc.fontSize(11).text(file.content);
+    doc.moveDown();
+  });
+  // Add AI command at end
+  doc.fontSize(12).text("\n<< AI COMMAND END >>", { bold: true });
+  doc.end();
+});
+
+// Start the server
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Backend listening on port ${PORT}`);
 });

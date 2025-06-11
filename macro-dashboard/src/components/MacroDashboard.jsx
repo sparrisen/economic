@@ -1,358 +1,234 @@
+// frontend/src/App.jsx (React)
 import React, { useState, useEffect } from "react";
-import styles from "./MacroDashboard.module.scss";
-import { Search } from "lucide-react";
 import axios from "axios";
 
-const types = [
-    "Commodities",   // Metals, Energy, Agriculture
-    "Markets",       // Indices, Real Estate
-    "Bonds & Rates", // Bonds, Rates, Inflation
-    "FX",            // Valutor
-    "Stocks",        // Aktier
-    "Crypto"         // Krypto
-  ];
+function App() {
+  const [profiles, setProfiles] = useState([]);
+  const [selectedProfile, setSelectedProfile] = useState(null);
+  const [newProfileName, setNewProfileName] = useState("");
+  const [profileFiles, setProfileFiles] = useState([]);
 
-export default function MacroDashboard() {
-  const [timeRange, setTimeRange] = useState("change1D");
-  const [filter, setFilter] = useState("");
-  const [showPercent, setShowPercent] = useState(true);
-  const [selectedType, setSelectedType] = useState("Commodity");
-  const [macroData, setMacroData] = useState([]);
-
-  // Normalisering efter hämtning
-useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [commoditiesRes, bondsRes, usdEurRes] = await Promise.all([
-          axios.get("http://localhost:5000/api/commodities"),
-          axios.get("http://localhost:5000/api/bonds"),
-          axios.get("http://localhost:5000/api/usd-eur"),
-        ]);
-  
-        const rawData = [
-          ...commoditiesRes.data,
-          usdEurRes.data,
-          {
-            name: "BTC/USD",
-            value: 64000,
-            changePercent: -2.5,
-            changeValue: -1600,
-            type: "Crypto",
-            spotPrice: false,
-          },
-          ...bondsRes.data,
-        ];
-  
-        const normalizeType = (type) => {
-          if (["Metals", "Energy", "Agriculture"].includes(type)) return "Commodities";
-          if (["Indices", "Real Estate"].includes(type)) return "Markets";
-          if (["Bond", "Rates", "Inflation"].includes(type)) return "Bonds & Rates";
-          return type;
-        };
-  
-        const normalizedData = rawData.map(item => ({
-          ...item,
-          rawType: item.type,
-          type: normalizeType(item.type)
-        }));
-  
-        setMacroData(normalizedData);
-      } catch (err) {
-        console.error("API fetch failed:", err);
-      }
-    };
-  
-    fetchData();
+  // Fetch profiles on component mount
+  useEffect(() => {
+    axios.get("http://localhost:5000/api/profiles")
+      .then(res => {
+        setProfiles(res.data);
+      })
+      .catch(err => console.error("Failed to fetch profiles:", err));
   }, []);
-   
 
-  if (macroData.length === 0) {
-    return <div className={styles.loading}>Laddar makrodata...</div>;
-  }
-  
-
-  const filteredData = macroData.filter(
-    (item) =>
-      item.type === selectedType &&
-      item.name.toLowerCase().includes(filter.toLowerCase())
-  );
-
-    const grouped = {};
-        filteredData.forEach(item => {
-        const key = item.rawType || "Other";
-        if (!grouped[key]) grouped[key] = [];
-        grouped[key].push(item);
-    });
-
-  const renderValue = (item) => {
-    if (item.type === "Bond") {
-      return `${item.value.toFixed(3)}%`;
+  // Handle creating a new profile
+  const createProfile = async () => {
+    if (!newProfileName.trim()) return;
+    try {
+      const res = await axios.post("http://localhost:5000/api/profiles", { name: newProfileName });
+      const profile = res.data;
+      setProfiles(prev => [...prev, profile]);
+      setSelectedProfile(profile);
+      setProfileFiles([]);  // new profile has no files yet
+      setNewProfileName("");
+    } catch (err) {
+      console.error("Create profile failed:", err.response?.data || err);
+      // Optionally handle name conflict or error feedback
     }
-  
-    if (item.type === "Metals") {
-      return `$${item.value.toFixed(2)}`; // Exakt det du ville
-    }
-  
-    if (item.value > 1000) return `$${item.value.toFixed(0)}`;
-    if (item.value > 100) return `$${item.value.toFixed(2)}`;
-    if (item.value > 1) return `$${item.value.toFixed(3)}`;
-    return `$${item.value.toFixed(4)}`;
   };
-  
-  const timeframeToKey = {
-    "1D": "change1D",
-    "3D": "change3D",
-    "1W": "change1W",
-    "1M": "change1M",
-    "YTD": "changeYTD",
-    "1Y": "change1Y",
-    "5Y": "change5Y"
-  };  
-  
-  const renderChange = (item) => {
-    const rawChange = Number(item[timeRange]);
-    const rawPercent = Number(item[`${timeRange}Percent`]);
-  
-    if (rawChange == null || rawPercent == null) {
-      return <span className={styles.statusStable}>—</span>;
+
+  const deleteFile = async (index) => {
+    if (!window.confirm("Är du säker på att du vill ta bort detta dokument?")) return;
+
+    try {
+      await axios.delete(`http://localhost:5000/api/profiles/${selectedProfile.id}/files/${index}`);
+      const res = await axios.get(`http://localhost:5000/api/profiles/${selectedProfile.id}`);
+      setProfileFiles(res.data.files);
+    } catch (err) {
+      console.error("Failed to delete file:", err);
     }
-  
-    const up = rawChange > 0;
-    const down = rawChange < 0;
-    const sign = up ? "+" : down ? "−" : "";
-  
-    const className = up
-      ? styles.statusUp
-      : down
-      ? styles.statusDown
-      : styles.statusStable;
-  
-    return (
-      <span className={className}>
-        {showPercent
-          ? `${sign}${Math.abs(rawPercent).toFixed(2)}%`
-          : `${sign}$${Math.abs(rawChange).toFixed(2)}`
-        }
-      </span>
+  };
+
+
+  // Handle selecting a profile from the list
+  const selectProfile = async (profile) => {
+    setSelectedProfile(profile);
+    try {
+      const res = await axios.get(`http://localhost:5000/api/profiles/${profile.id}`);
+      setProfileFiles(res.data.files || []);
+    } catch (err) {
+      console.error("Failed to load profile data:", err);
+      setProfileFiles([]);
+    }
+  };
+
+  const updateFile = async (index, updateData) => {
+  try {
+    await axios.put(
+      `http://localhost:5000/api/profiles/${selectedProfile.id}/files/${index}`,
+      updateData
     );
+    const res = await axios.get(
+      `http://localhost:5000/api/profiles/${selectedProfile.id}`
+    );
+    setProfileFiles(res.data.files);
+  } catch (err) {
+    console.error("Failed to update file:", err);
+  }
+};
+
+
+  // Handle file upload (drag & drop or file input selection)
+  const handleFilesUpload = async (fileList) => {
+    if (!selectedProfile) {
+      alert("Please select a profile first.");
+      return;
+    }
+    const filesArray = Array.from(fileList);
+    if (filesArray.length === 0) return;
+    const formData = new FormData();
+    filesArray.forEach(file => {
+      formData.append("files", file);
+    });
+    try {
+      const res = await axios.post(
+        `http://localhost:5000/api/profiles/${selectedProfile.id}/files`,
+        formData,
+        { headers: { "Content-Type": "multipart/form-data" } }
+      );
+      // Update the file list with response data
+      setProfileFiles(res.data.files);
+    } catch (err) {
+      console.error("File upload failed:", err.response?.data || err);
+    }
   };
-  
-   
-  
+
+  // Drag-and-drop event handlers
+  const onDrop = (e) => {
+    e.preventDefault();
+    handleFilesUpload(e.dataTransfer.files);
+  };
+  const onDragOver = (e) => {
+    e.preventDefault();
+  };
+
+  // Trigger document generation (opens the compiled PDF in a new tab)
+  const generateDocument = () => {
+    if (!selectedProfile) return;
+    window.open(`http://localhost:5000/api/profiles/${selectedProfile.id}/compile`, "_blank");
+  };
+
   return (
-    <div className={styles.dashboard}>
-      <div className={styles.tabs}>
-        {types.map((type) => (
-            <button
-            key={type}
-            className={
-                selectedType === type
-                ? styles.activeTab
-                : styles.inactiveTab
-            }
-            onClick={() => setSelectedType(type)}
-            >
-            {type}
-            </button>
-        ))}
-        </div>
-
-
-      <div className={styles.header}>
-        <div className={styles.rangeButtons}>
-            {["change1D", "change3D", "change1W", "change1M", "changeYTD", "change1Y", "change5Y"].map(range => (
-                <button
-                key={range}
-                className={timeRange === range ? styles.activeTab : styles.inactiveTab}
-                onClick={() => setTimeRange(range)}
-                >
-                {range.replace("change", "")}
-                </button>
-            ))}
-        </div>
-
-
-        <div className={styles.searchBar}>
-          <div className={styles.searchWrapper}>
-            <Search className={styles.icon} />
-            <input
-              type="text"
-              className={styles.searchInput}
-              placeholder="Search..."
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-            />
-          </div>
-          <button
-            className={`${styles.toggleButton} ${
-                showPercent ? styles.percentActive : styles.dollarActive
-            }`}
-            onClick={() => setShowPercent((prev) => !prev)}
-            >
-            {showPercent ? "Showing %" : "Showing $"}
-        </button>
-
+    <div style={{ display: "flex", padding: "20px", fontFamily: "Arial, sans-serif" }}>
+      {/* Profile list and creation form */}
+      <div style={{ width: "250px", marginRight: "40px" }}>
+        <h2>Profiler</h2>
+        <ul style={{ listStyleType: "none", paddingLeft: 0 }}>
+          {profiles.map((p) => (
+            <li 
+              key={p.id} 
+              onClick={() => selectProfile(p)} 
+              style={{
+                cursor: "pointer", 
+                margin: "5px 0", 
+                fontWeight: selectedProfile?.id === p.id ? "bold" : "normal"
+              }}>
+              {p.name}
+            </li>
+          ))}
+        </ul>
+        <div style={{ marginTop: "20px" }}>
+          <input 
+            type="text" 
+            placeholder="Nytt profilnamn" 
+            value={newProfileName} 
+            onChange={(e) => setNewProfileName(e.target.value)} 
+            style={{ width: "70%" }} 
+          />
+          <button onClick={createProfile} style={{ marginLeft: "5px" }}>Skapa</button>
         </div>
       </div>
-      {Object.entries(grouped).map(([group, items]) => (
-        <div key={group} className={styles.tableCard}>
-            <h2 className={styles.subHeader}>{group}</h2>
 
-            {/* METALS */}
-            {group === "Metals" && (
-            <table className={styles.table}>
-                <thead>
-                <tr>
-                    <th>Asset</th>
-                    <th>Last Price</th>
-                    <th>Change</th>
-                    <th>Time</th>
-                </tr>
-                </thead>
-                <tbody>
-                {items.map((item, index) => (
-                    <tr key={index}>
-                    <td>{item.name}</td>
-                    <td>${item.value.toFixed(2)}</td>
-                    <td>{renderChange(item, false)}</td>
-                    <td>{item.time || "N/A"}</td>
-                    </tr>
+      {/* Selected profile details and file upload section */}
+      <div style={{ flex: 1 }}>
+        {selectedProfile ? (
+          <div>
+            <h2>{selectedProfile.name}</h2>
+            {/* File upload drop zone */}
+            <div
+              onDrop={onDrop}
+              onDragOver={onDragOver}
+              onClick={() => document.getElementById("fileInput").click()}
+              style={{
+                border: "2px dashed #aaa",
+                padding: "30px",
+                textAlign: "center",
+                marginBottom: "15px",
+                cursor: "pointer",
+              }}
+            >
+              Släpp filer här eller klicka för att välja
+              <input
+                id="fileInput"
+                type="file"
+                multiple
+                style={{ display: "none" }}
+                onChange={(e) => handleFilesUpload(e.target.files)}
+              />
+            </div>
+            {profileFiles.length > 0 ? (
+              <ul>
+                {profileFiles.map((file, idx) => (
+                  <div key={idx} style={{ marginBottom: '20px', borderBottom: '1px solid #ccc', paddingBottom: '10px' }}>
+                    <strong>{file.title}</strong> – {file.type}<br />
+                    
+                    <label>
+                      Datum:
+                      <input
+                        type="date"
+                        defaultValue={file.date.split('T')[0]}
+                        onBlur={(e) =>
+                          updateFile(idx, { date: e.target.value })
+                        }
+                      />
+                    </label>
+                    <br />
+                    
+                    <label>
+                      Tags:
+                      <input
+                        type="text"
+                        defaultValue={file.tags ? file.tags.join(', ') : ''}
+                        onBlur={(e) => {
+                          const tagArray = e.target.value
+                            .split(',')
+                            .map(t => t.trim())
+                            .filter(Boolean);
+                          updateFile(idx, { tags: tagArray });
+                        }}
+                      />
+                    </label>
+                    <button
+                      style={{ marginTop: '8px', color: 'red' }}
+                      onClick={() => deleteFile(idx)}
+                    >
+                      🗑 Ta bort
+                    </button>
+
+                  </div>
                 ))}
-                </tbody>
-            </table>
+
+              </ul>
+            ) : (
+              <p><em>Inga uppladdade filer ännu.</em></p>
             )}
-
-            {/* ENERGY */}
-            {group === "Energy" && (
-            <table className={styles.table}>
-                <thead>
-                <tr>
-                    <th>Asset</th>
-                    <th>Last Price</th>
-                    <th>Change</th>
-                    <th>% Change</th>
-                    <th>Time</th>
-                </tr>
-                </thead>
-                <tbody>
-                {items.map((item, index) => (
-                    <tr key={index}>
-                    <td>{item.name}</td>
-                    <td>${item.value.toFixed(2)}</td>
-                    <td>{renderChange(item, false)}</td>
-                    <td>{renderChange(item, true)}</td>
-                    <td>{item.time || "N/A"}</td>
-                    </tr>
-                ))}
-                </tbody>
-            </table>
-            )}
-
-            {/* BONDS */}
-            {(group === "Bond" || group === "Rates" || group === "Bonds & Rates") && (
-            <table className={styles.table}>
-                <thead>
-                <tr>
-                    <th>Bond</th>
-                    <th>Yield</th>
-                    <th>Change</th>
-                    <th>Time</th>
-                </tr>
-                </thead>
-                <tbody>
-                {items.map((item, index) => (
-                    <tr key={index}>
-                    <td>{item.name}</td>
-                    <td>{item.value.toFixed(3)}%</td>
-                    <td>{renderChange(item, false)}</td>
-                    <td>{item.time || "N/A"}</td>
-                    </tr>
-                ))}
-                </tbody>
-            </table>
-            )}
-
-            {/* FX */}
-            {group === "FX" && (
-            <table className={styles.table}>
-                <thead>
-                <tr>
-                    <th>Currency Pair</th>
-                    <th>Exchange Rate</th>
-                    <th>Change</th>
-                    <th>% Change</th>
-                    <th>Time</th>
-                </tr>
-                </thead>
-                <tbody>
-                {items.map((item, index) => (
-                    <tr key={index}>
-                    <td>{item.name}</td>
-                    <td>{item.value.toFixed(4)}</td>
-                    <td>{renderChange(item, false)}</td>
-                    <td>{renderChange(item, true)}</td>
-                    <td>{item.time || "N/A"}</td>
-                    </tr>
-                ))}
-                </tbody>
-            </table>
-            )}
-
-            {/* AGRICULTURE */}
-            {group === "Agriculture" && (
-            <table className={styles.table}>
-                <thead>
-                <tr>
-                    <th>Asset</th>
-                    <th>Last Price</th>
-                    <th>Change</th>
-                    <th>% Change</th>
-                    <th>Time</th>
-                </tr>
-                </thead>
-                <tbody>
-                {items.map((item, index) => (
-                    <tr key={index}>
-                    <td>{item.name}</td>
-                    <td>${item.value.toFixed(2)}</td>
-                    <td>{renderChange(item, false)}</td>
-                    <td>{renderChange(item, true)}</td>
-                    <td>{item.time || "N/A"}</td>
-                    </tr>
-                ))}
-                </tbody>
-            </table>
-            )}
-
-            {/* MARKETS */}
-            {group === "Markets" && (
-            <table className={styles.table}>
-                <thead>
-                <tr>
-                    <th>Index</th>
-                    <th>Last Level</th>
-                    <th>Change</th>
-                    <th>% Change</th>
-                    <th>Time</th>
-                </tr>
-                </thead>
-                <tbody>
-                {items.map((item, index) => (
-                    <tr key={index}>
-                    <td>{item.name}</td>
-                    <td>{item.value.toLocaleString()}</td>
-                    <td>{renderChange(item, false)}</td>
-                    <td>{renderChange(item, true)}</td>
-                    <td>{item.time || "N/A"}</td>
-                    </tr>
-                ))}
-                </tbody>
-            </table>
-            )}
-        </div>
-        ))}
-
-
+            {/* Generate document button */}
+            <button onClick={generateDocument} style={{ marginTop: "15px" }}>
+              Generera sammansatt dokument
+            </button>
+          </div>
+        ) : (
+          <p>Välj en profil för att se detaljer och ladda upp filer.</p>
+        )}
+      </div>
     </div>
   );
 }
+
+export default App;
