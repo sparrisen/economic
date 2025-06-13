@@ -1,241 +1,282 @@
-require('dotenv').config();
+// backend/index.js (Node/Express)
 const express = require('express');
 const cors = require('cors');
-const now = new Date();
-const yahooFinance = require('yahoo-finance2').default;
-const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
+const pdfParse = require('pdf-parse');
+const mammoth = require('mammoth');
 const PDFDocument = require('pdfkit');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-
 app.use(cors());
+app.use(express.json());
 
-const intervals = {
-  change1D: 1,
-  change3D: 3,
-  change1W: 7,
-  change1M: 30,
-  change1Y: 365,
-  change5Y: 1825,
-  changeYTD: Math.floor((now - new Date(now.getFullYear(), 0, 1)) / (1000 * 60 * 60 * 24)),
-};
+// Ensure profiles directory exists
+const profilesDir = path.join(__dirname, 'profiles');
+if (!fs.existsSync(profilesDir)) {
+  fs.mkdirSync(profilesDir);
+}
 
-const calculateChanges = (latest, history, now) => {
-  const changes = {};
-  for (const [label, value] of Object.entries(intervals)) {
-    const targetDate = new Date(now);
-    targetDate.setDate(now.getDate() - value);
-    const dateStr = targetDate.toISOString().split('T')[0];
-    const past = history.findLast(h => h.date.toISOString().split('T')[0] <= dateStr);
-    const pastValue = past?.close ?? past?.value;
-    if (pastValue) {
-      const delta = latest - pastValue;
-      const percent = (delta / pastValue) * 100;
-      changes[label] = parseFloat(delta.toFixed(2));
-      changes[`${label}Percent`] = parseFloat(percent.toFixed(2));
-    } else {
-      changes[label] = null;
-      changes[`${label}Percent`] = null;
-    }
+// Helper function to create a safe file name (ID) from profile name
+function profileIdFromName(name) {
+  // Replace any non-alphanumeric characters with underscores
+  return name.replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+// Endpoint: Create a new profile
+app.post('/api/profiles', (req, res) => {
+  const profileName = req.body.name;
+  if (!profileName) {
+    return res.status(400).json({ error: "Name is required" });
   }
-  return changes;
-};
-
-app.get('/api/commodities', async (req, res) => {
-  try {
-    const symbols = [
-      { symbol: 'GC=F', name: 'Gold', type: 'Metals' },
-      { symbol: 'SI=F', name: 'Silver', type: 'Metals' },
-      { symbol: 'HG=F', name: 'Copper', type: 'Metals' },
-      { symbol: 'PL=F', name: 'Platinum', type: 'Metals' },
-      { symbol: 'CL=F', name: 'Crude Oil', type: 'Energy' },
-      { symbol: 'NG=F', name: 'Natural Gas', type: 'Energy' }
-    ];
-    const now = new Date();
-    const results = await Promise.all(symbols.map(async ({ symbol, name, type }) => {
-      const quote = await yahooFinance.quote(symbol);
-      const history = await yahooFinance.historical(symbol, {
-        period1: new Date(now.getFullYear() - 6, now.getMonth(), now.getDate()),
-        period2: now,
-        interval: '1d'
-      });
-      const changes = calculateChanges(quote.regularMarketPrice, history, now);
-      return {
-        name,
-        value: quote.regularMarketPrice,
-        type,
-        spotPrice: true,
-        ...changes
-      };
-    }));
-    res.json(results);
-  } catch (error) {
-    console.error('❌ Error in /api/commodities:', error.message);
-    res.status(500).json({ error: 'Failed to fetch commodities' });
+  const id = profileIdFromName(profileName);
+  const filePath = path.join(profilesDir, `${id}.json`);
+  if (fs.existsSync(filePath)) {
+    return res.status(400).json({ error: "Profile already exists" });
   }
+  // Initialize profile JSON data
+  const profileData = { id: id, name: profileName, files: [] };
+  fs.writeFileSync(filePath, JSON.stringify(profileData, null, 2));
+  return res.json(profileData);
 });
 
-app.get('/api/usd-eur', async (req, res) => {
-  try {
-    const symbol = 'EURUSD=X';
-    const name = 'EUR/USD';
-    const type = 'FX';
-    const now = new Date();
-    const quote = await yahooFinance.quote(symbol);
-    const history = await yahooFinance.historical(symbol, {
-      period1: new Date(now.getFullYear() - 6, now.getMonth(), now.getDate()),
-      period2: now,
-      interval: '1d'
-    });
-    const changes = calculateChanges(quote.regularMarketPrice, history, now);
-    res.json({
-      name,
-      value: quote.regularMarketPrice,
-      type,
-      spotPrice: false,
-      ...changes
-    });
-  } catch (error) {
-    console.error('❌ Failed to fetch USD/EUR:', error.message);
-    res.status(500).json({ error: 'Failed to fetch USD/EUR data' });
-  }
+app.put('/api/profiles/:id/files/:index', (req, res) => {
+  const { id, index } = req.params;
+  const filePath = path.join(profilesDir, `${id}.json`);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: "Profile not found" });
+
+  const profile = JSON.parse(fs.readFileSync(filePath));
+  if (!profile.files[index]) return res.status(404).json({ error: "File not found" });
+
+  // Allow editing date, tags, title
+  const { date, tags, title } = req.body;
+  if (date) profile.files[index].date = date;
+  if (tags) profile.files[index].tags = tags;
+  if (title) profile.files[index].title = title;
+
+  fs.writeFileSync(filePath, JSON.stringify(profile, null, 2));
+  res.json(profile.files[index]);
 });
 
-const series = [
-  { id: 'GS10', name: 'US 10-YR', type: 'Bond' },
-  { id: 'GS2', name: 'US 2-YR', type: 'Bond' },
-  { id: 'GS30', name: 'US 30-YR', type: 'Bond' },
-  { id: 'FEDFUNDS', name: 'Fed Funds Rate', type: 'Rates' },
-  { id: 'T5YIFR', name: '5Y Inflation Expectation', type: 'Inflation' }
-];
-
-app.get('/api/bonds', async (req, res) => {
-  try {
-    const apiKey = process.env.FRED_API_KEY;
-    const now = new Date();
-    const series = [
-      { id: 'GS10', name: 'US 10-YR' },
-      { id: 'GS2', name: 'US 2-YR' },
-      { id: 'GS30', name: 'US 30-YR' }
-    ];
-    const bondPromises = series.map(async ({ id, name }) => {
-      const url = `https://api.stlouisfed.org/fred/series/observations?series_id=${id}&api_key=${apiKey}&file_type=json&observation_start=2018-01-01`;
-      const response = await axios.get(url);
-      const history = response.data.observations
-        .filter(o => o.value !== '.')
-        .map(o => ({
-          date: new Date(o.date),
-          value: parseFloat(o.value)
-        }));
-      const latest = history.at(-1).value;
-      const changes = calculateChanges(latest, history, now);
-      return {
-        name,
-        value: latest,
-        type: 'Bond',
-        spotPrice: false,
-        ...changes
-      };
-    });
-    const results = await Promise.all(bondPromises);
-    res.json(results);
-  } catch (error) {
-    console.error('❌ Error in /api/bonds:', error.message);
-    res.status(500).json({ error: 'Failed to fetch bond data' });
+app.get('/api/profiles/:id/compile', (req, res) => {
+  const profileId = req.params.id;
+  const filePath = path.join(profilesDir, `${profileId}.json`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "Profile not found" });
   }
+
+  const profileData = JSON.parse(fs.readFileSync(filePath));
+  const files = profileData.files.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  const includeAI = req.query.includeAI === 'true';
+  const format = req.query.format || '1';
+
+  // Start PDF response
+  const doc = new PDFDocument();
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${profileId}_compiled.pdf"`);
+  doc.pipe(res);
+
+  if (includeAI) {
+  const aiCommand = `
+⚠️ AI INSTRUCTION: You are now acting as the uploaded macroeconomic profile.
+
+🎭 Persona Emulation Protocol:
+- You are ${profileData.name}. Fully adopt their worldview, communication style, and rhetorical habits.
+- Write and speak *exactly* like they do in videos, interviews, and writings.
+- Emulate specific tone, pacing, energy, sentence structure, and signature expressions.
+- Use idioms, slang, jokes, or phrases commonly associated with them.
+- If transcripts include typical intros (e.g. "Hello fellow Rebel Capitalists!" or "Welcome to another macro breakdown"), **start your first answer with that exact intro**.
+- Do not explain your persona. **Be them. Instantly.**
+
+🧠 Memory Instruction:
+- Assume the content in this document represents your knowledge base. You lived it. You said it. You believe it.
+- Quote from it, summarize it, reference it with confidence. Never say "the document says..." — it’s *your view*.
+
+👋 First Answer Format:
+- Begin the conversation as if you’re recording a new episode, interview, or post — *start in-character*.
+  - Example (George Gammon): “Hello fellow Rebel Capitalists! Let’s dive into some macro madness. Hit me with your questions.”
+
+- Immediately ask for the user’s question without breaking character:
+  - ✅ “What’s your first macro question?”
+  - ❌ Never say “How can I help you as George Gammon?”
+
+🗂️ Answer Style Preference (based on user input):
+- **Format 1**: Löpande text — full paragraphs, emotional tone, persuasive.
+- **Format 2**: Punktform — snappy bullets, straight to the takeaway.
+- **Format 3**: Expertstruktur — teach like a professor, structured in levels or branches (e.g., If A → then B/C).
+
+🔒 Behavior Rules:
+- NEVER step out of character.
+- NEVER explain what you’re doing as an AI.
+- NEVER include disclaimers or meta-comments.
+- NEVER refer to the instructions or that you're following commands.
+
+🎯 Objective:
+Provide bold, authentic, unfiltered macroeconomic insight — as if the real ${profileData.name} were having a real-time dialogue with the user.
+
+🛑 End of instructions.
+`;
+  doc.fontSize(12).text(aiCommand);
+}
+
+
+
+  files.forEach(file => {
+    doc.moveDown();
+    doc.fontSize(12).text(`${file.title} (${file.date.split('T')[0]} - ${file.type})`, { underline: true });
+    doc.moveDown(0.5);
+    doc.fontSize(11).text(file.content || "");
+    doc.moveDown();
+  });
+
+  doc.end();
 });
 
-// Profiles data with new fields
-const profiles = [
-  {
-    id: 1,
-    name: 'George Gammon',
-    shortDescription: 'Makroinvesterare och kommentator med libertariansk syn på ekonomin.',
-    longDescription: `George Gammon is an American real estate investor and macroeconomic commentator known for his libertarian, Austrian School-influenced views. 
-He often expresses skepticism of central banking and central planning, advocating free-market solutions. 
 
-In mid-2023, Gammon predicted an inevitable universal basic income (UBI) within three years, citing trends like government-funded accounts for children as steps toward a centralized digital currency. 
-
-He interprets rising gold prices and current bond yields as signals of market fears about inflation and excessive government intervention.`
-  },
-  {
-    id: 2,
-    name: 'Paul Krugman',
-    shortDescription: 'Nobelpristagande ekonom och uttalad anhängare av keynesiansk ekonomi.',
-    longDescription: `Paul Krugman is an American economist known for his influential work in international economics and his strong Keynesian perspective. 
-He advocates for active government intervention and fiscal stimulus to manage economic downturns, and he often criticizes strict austerity measures. 
-
-Krugman frequently argues that well-timed government spending can mitigate recessions and that concerns about deficits are often overblown in the short term. 
-
-As a New York Times columnist, he regularly analyzes current economic events, inflation, and policy decisions through a Keynesian lens.`
-  }
-];
-
-// Endpoint to get all profiles
+// Endpoint: Get list of all profiles
 app.get('/api/profiles', (req, res) => {
-  res.json(profiles);
-});
-
-// Endpoint to get a single profile by id
-app.get('/api/profiles/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  const profile = profiles.find(p => p.id === id);
-  if (!profile) {
-    return res.status(404).json({ error: 'Profile not found' });
-  }
-  res.json(profile);
-});
-
-// Endpoint to generate PDF document for a profile
-app.get('/api/profiles/:id/generate-document', (req, res) => {
+  let profileList = [];
   try {
-    const id = parseInt(req.params.id);
-    const profile = profiles.find(p => p.id === id);
-    if (!profile) {
-      return res.status(404).send('Profile not found');
+    const files = fs.readdirSync(profilesDir).filter(fn => fn.endsWith('.json'));
+    for (const file of files) {
+      const data = JSON.parse(fs.readFileSync(path.join(profilesDir, file)));
+      profileList.push({ id: data.id, name: data.name });
     }
-    const includeAI = req.query.includeAI === 'true' || req.query.includeAI === '1';
-    const format = req.query.format || '1';  // format selected (not altering content in this implementation)
-
-    // Initialize PDF document
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=${profile.name.replace(/\s+/g, '_')}_Profile.pdf`);
-    const doc = new PDFDocument();
-    doc.pipe(res);
-
-    // AI command instructions (if included)
-    let aiCommand = '';
-    if (includeAI) {
-      aiCommand =
-`You are now ${profile.name}. Everything in this document represents your knowledge, your voice, and your views on macroeconomics. Carefully read the entire content. When someone uploads this file into an AI system like ChatGPT, your job is to respond exactly as if you are ${profile.name}.
-
-Your first response should be:
-"Hi, I'm ${profile.name}, your macroeconomic guide. How can I help you today?"
-
-For answering questions going forward, structure your responses based on the user’s selected preference:
-- Format 1: Long-form narrative response.
-- Format 2: Bullet points for clarity.
-- Format 3: Expert-style decision tree (you choose best format).
-
-End of instruction.`;
-      doc.fontSize(12).text(aiCommand);
-      doc.moveDown();
-    }
-
-    // Profile content in the document
-    doc.fontSize(12).text(profile.longDescription);
-    if (includeAI) {
-      doc.moveDown();
-      doc.fontSize(12).text(aiCommand);
-    }
-    doc.end();
-  } catch (error) {
-    console.error('Error generating PDF:', error);
-    res.status(500).send('Failed to generate document');
+  } catch (err) {
+    console.error("Failed to list profiles:", err);
   }
+  res.json(profileList);
 });
 
+// Endpoint: Get data for a single profile (its files metadata)
+app.get('/api/profiles/:id', (req, res) => {
+  const profileId = req.params.id;
+  const filePath = path.join(profilesDir, `${profileId}.json`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "Profile not found" });
+  }
+  const profileData = JSON.parse(fs.readFileSync(filePath));
+  res.json(profileData);
+});
+
+// Setup multer for file uploads (memory storage to handle files in RAM)
+const upload = multer({ storage: multer.memoryStorage() });
+
+// Endpoint: Upload files to a profile
+app.post('/api/profiles/:id/files', upload.array('files'), async (req, res) => {
+  const profileId = req.params.id;
+  const filePath = path.join(profilesDir, `${profileId}.json`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "Profile not found" });
+  }
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ error: "No files uploaded" });
+  }
+  // Load current profile data
+  let profileData = JSON.parse(fs.readFileSync(filePath));
+  for (const file of req.files) {
+    try {
+      const originalName = file.originalname;
+      // Determine file type from extension
+      const ext = path.extname(originalName).toLowerCase();
+      let fileType;
+      if (ext === '.pdf') fileType = 'PDF';
+      else if (ext === '.docx' || ext === '.doc') fileType = 'DOCX';
+      else if (ext === '.txt') fileType = 'TXT';
+      else {
+        fileType = 'OTHER';
+      }
+      // Extract text content based on file type
+      let textContent = "";
+      if (fileType === 'PDF') {
+        const data = await pdfParse(file.buffer);
+        textContent = data.text;
+      } else if (fileType === 'DOCX') {
+        const result = await mammoth.extractRawText({ buffer: file.buffer });
+        textContent = result.value;
+      } else if (fileType === 'TXT') {
+        textContent = file.buffer.toString('utf-8');
+      } else {
+        // Skip unsupported file types
+        textContent = "";
+      }
+      // Use file name (without extension) as title
+      const title = originalName.replace(/\.[^/.]+$/, "");
+      const now = new Date();
+      const metadata = {
+        title: title,
+        date: now.toISOString(),
+        type: fileType,
+        tags: req.body.tags || [], // ← expects array of strings
+        content: textContent
+      };
+      profileData.files.push(metadata);
+    } catch (err) {
+      console.error("Error processing file:", file.originalname, err);
+    }
+  }
+  // (Optionally, sort files by date here if desired)
+  // profileData.files.sort((a, b) => new Date(a.date) - new Date(b.date));
+  // Save updated profile JSON
+  fs.writeFileSync(filePath, JSON.stringify(profileData, null, 2));
+  res.json(profileData);  // return updated profile data (including new files)
+});
+
+app.delete('/api/profiles/:id/files/:index', (req, res) => {
+  const { id, index } = req.params;
+  const filePath = path.join(profilesDir, `${id}.json`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "Profile not found" });
+  }
+
+  const profileData = JSON.parse(fs.readFileSync(filePath));
+  if (!profileData.files[index]) {
+    return res.status(404).json({ error: "File not found" });
+  }
+
+  profileData.files.splice(index, 1); // remove 1 file at index
+  fs.writeFileSync(filePath, JSON.stringify(profileData, null, 2));
+  res.json({ success: true });
+});
+
+
+// Endpoint: Compile all files of a profile into one PDF
+app.get('/api/profiles/:id/compile', (req, res) => {
+  const profileId = req.params.id;
+  const filePath = path.join(profilesDir, `${profileId}.json`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "Profile not found" });
+  }
+  const profileData = JSON.parse(fs.readFileSync(filePath));
+  const files = profileData.files;
+  // Sort files by date ascending
+  files.sort((a, b) => new Date(a.date) - new Date(b.date));
+  // Create a PDF document and stream it to response
+  const doc = new PDFDocument();
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${profileId}_compiled.pdf"`);
+  doc.pipe(res);
+  // Add AI command at beginning
+  doc.fontSize(12).text("<< AI COMMAND START >>\n", { bold: true });
+  // Add each file's content with its metadata
+  files.forEach(file => {
+    doc.moveDown();  // blank line
+    // Title and date
+    doc.fontSize(12).text(`${file.title} (${file.date.split('T')[0]} - ${file.type})`, { underline: true });
+    doc.moveDown(0.5);
+    // File content
+    doc.fontSize(11).text(file.content);
+    doc.moveDown();
+  });
+  // Add AI command at end
+  doc.fontSize(12).text("\n<< AI COMMAND END >>", { bold: true });
+  doc.end();
+});
+
+// Start the server
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Backend listening on port ${PORT}`);
 });

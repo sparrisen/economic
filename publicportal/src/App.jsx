@@ -1,7 +1,7 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
-import ProfileList from './ProfileList';
-import ProfileDetail from './ProfileDetail';
+import ProfileList from '../publicportal/src/ProfileList';
+import ProfileDetail from '../publicportal/src/ProfileDetail';
 
 function App() {
   return (

@@ -16,7 +16,7 @@ function ProfileDetail() {
   }, [id]);
 
   const handleDownload = () => {
-    const url = `/api/profiles/${id}/generate-document?includeAI=${includeAI ? 'true' : 'false'}&format=${format}`;
+    const url = `/api/profiles/${id}/compile?includeAI=${includeAI ? 'true' : 'false'}&format=${format}`;
     fetch(url)
       .then(res => {
         if (!res.ok) throw new Error('Server error');
